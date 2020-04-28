@@ -75,9 +75,16 @@ static char * subscriber_error_strings[] =
 };
 #endif /* CLIB_MARCH_VARIANT */
 
+#define foreach_subscriber_input_next  \
+_(DROP, "error-drop")                  \
+_(IP4_INPUT, "ip4-input")              \
+_(IP6_INPUT, "ip6-input" )             \
+
 typedef enum 
 {
-  SUBSCRIBER_NEXT_INTERFACE_OUTPUT,
+  #define _(s,n) SUBSCRIBER_INPUT_NEXT_##s,
+  foreach_subscriber_input_next
+  #undef _
   SUBSCRIBER_N_NEXT,
 } subscriber_next_t;
 
@@ -298,7 +305,9 @@ VLIB_REGISTER_NODE (subscriber_node) =
 
   /* edit / add dispositions here */
   .next_nodes = {
-        [SUBSCRIBER_NEXT_INTERFACE_OUTPUT] = "interface-output",
+  #define _(s,n) [SUBSCRIBER_INPUT_NEXT_##s] = n,
+    foreach_subscriber_input_next
+  #undef _
   },
 };
 #endif /* CLIB_MARCH_VARIANT */

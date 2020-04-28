@@ -34,6 +34,16 @@ typedef struct {
     /* Node index, non-zero if the periodic process has been created */
     u32 periodic_node_index;
 
+      /**
+   * Hash mapping parent sw_if_index and client mac address to p2p_ethernet sub-interface
+   */
+  uword * p2p_ethernet_by_key;
+
+  u32 *p2p_ethernet_by_sw_if_index;
+
+  // Pool of p2p subifs;
+  subint_config_t *p2p_subif_pool;
+
     /* convenience */
     vlib_main_t * vlib_main;
     vnet_main_t * vnet_main;
@@ -41,6 +51,19 @@ typedef struct {
 } subscriber_main_t;
 
 extern subscriber_main_t subscriber_main;
+
+/**
+ * @brief Key struct for Subscriber
+ * all fields in NET byte order
+ */
+
+typedef struct {
+  u8 mac[6];
+  u16 pad1;         // padding for u64 mac address
+  u32 hw_if_index;
+  u16 outer_vlan;
+  u16 inner_vlan;
+} p2p_key_t;
 
 extern vlib_node_registration_t subscriber_node;
 extern vlib_node_registration_t subscriber_periodic_node;
