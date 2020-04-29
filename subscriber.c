@@ -138,7 +138,7 @@ susbcriber_add_del (u32 parent_if_index, u8 * client_mac,
                     int is_add, u16 outer_vlan, u16 inner_vlan)
 {
   vnet_main_t *vnm = vnet_get_main ();
-  subscriber_main_t *main = &subscriber_main;
+  subscriber_main_t *sm = &subscriber_main;
   //vnet_interface_main_t *im = &vnm->interface_main;
   subscriber_session_t *t = 0;
   u32 hw_if_index = ~0;
@@ -151,31 +151,37 @@ susbcriber_add_del (u32 parent_if_index, u8 * client_mac,
   // subscriber_if_index = subscriber_lookup (parent_if_index, client_mac, outer_vlan, inner_vlan);
 
   // actually adding a new session
-  pool_get_aligned (main->sessions, t, CLIB_CACHE_LINE_BYTES);
+  pool_get_aligned (sm->sessions, t, CLIB_CACHE_LINE_BYTES);
   clib_memset (t, 0, sizeof (*t));
   clib_memcpy (t->local_mac, hi->hw_address, 6);
   clib_memcpy (t->client_mac, client_mac, 6);
   t->outer_vlan = outer_vlan;
   t->inner_vlan = inner_vlan;
   t->encap_if_index = parent_if_index;
-  t->session_id = t - main->sessions;
+  t->session_id = t - sm->sessions;
+  t->client_ip = client_ip;
 
-  if (vec_len (main->free_subscriber_session_hw_if_indices) > 0) {
+  if (vec_len (sm->free_subscriber_session_hw_if_indices) > 0) {
     // TODO
   } else {
     hw_if_index = vnet_register_interface
-	    (vnm, subscriber_device_class.index, t - main->sessions,
-	     subscriber_hw_class.index, t - main->sessions);
+	    (vnm, subscriber_device_class.index, t - sm->sessions,
+	     subscriber_hw_class.index, t - sm->sessions);
 	  hi = vnet_get_hw_interface (vnm, hw_if_index);
   }
   t->sw_if_index = sw_if_index = hi->sw_if_index;
 
-  vec_validate_init_empty (main->subscriber_by_sw_if_index, sw_if_index, ~0);
-  main->subscriber_by_sw_if_index[sw_if_index] = t - main->sessions;
+  vec_validate_init_empty (sm->subscriber_by_sw_if_index, sw_if_index, ~0);
+  sm->subscriber_by_sw_if_index[sw_if_index] = t - sm->sessions;
 
   vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, sw_if_index);
   si->flags &= ~VNET_SW_INTERFACE_FLAG_HIDDEN;
   vnet_sw_interface_set_flags (vnm, sw_if_index, VNET_SW_INTERFACE_FLAG_ADMIN_UP);
+
+  subscriber_key_t *sub_key;
+	sub_key = clib_mem_alloc (sizeof (*sub_key));
+	create_subscriber_key (sub_key, parent_if_index, client_mac, outer_vlan, inner_vlan);
+	hash_set_mem (sm->subscriber_by_key, sub_key, sw_if_index);
 
   return 0;
 }
@@ -372,22 +378,6 @@ static void vl_api_subscriber_enable_disable_t_handler
 /* API definitions */
 #include <subscriber/subscriber.api.c>
 
-static clib_error_t * subscriber_init (vlib_main_t * vm)
-{
-  subscriber_main_t * smp = &subscriber_main;
-  clib_error_t * error = 0;
-
-  smp->vlib_main = vm;
-  smp->vnet_main = vnet_get_main();
-
-  /* Add our API messages to the global name_crc hash table */
-  smp->msg_id_base = setup_message_id_table ();
-
-  return error;
-}
-
-VLIB_INIT_FUNCTION (subscriber_init);
-
 /* *INDENT-OFF* */
 VNET_FEATURE_INIT (subscriber, static) =
 {
@@ -405,11 +395,11 @@ format_subscriber_session (u8 * s, va_list * args)
 
   s = format (s, "ipsession%d\n", t - sm->sessions);
   s = format (s, "\tSubscriber ifindex %d\n", t->sw_if_index );
-  s = format (s, "\tIP Address: %U\n", format_ip46_address, &t->client_ip, IP46_TYPE_ANY );
-  s = format (s, "\tHW Interface index %d\n", t->encap_if_index );
-  s = format (s, "\tRouting table: %d\n", t->decap_fib_index );
-  s = format (s, "\tLocal MAC: %U\n", format_ethernet_address, t->local_mac);
   s = format (s, "\tClient MAC: %U\n", format_ethernet_address, t->client_mac);
+  s = format (s, "\tIP Address: %U\n", format_ip46_address, &t->client_ip, IP46_TYPE_ANY );
+  s = format (s, "\tRouting table: %d\n", t->decap_fib_index );
+  s = format (s, "\tHW Interface index %d\n", t->encap_if_index );
+  s = format (s, "\tLocal MAC: %U\n", format_ethernet_address, t->local_mac);
 
   return s;
 }
@@ -563,6 +553,24 @@ subscriber_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
 
   dpo_reset (&dpo);
 }
+
+
+static clib_error_t *
+subscriber_init (vlib_main_t * vm)
+{
+  subscriber_main_t *sm = &subscriber_main;
+
+  sm->vlib_main = vm;
+  sm->vnet_main = vnet_get_main ();
+  sm->subscriber_by_key = hash_create_mem (0, sizeof (subscriber_key_t), sizeof (subscriber_entry_result_t));
+
+  /* Add our API messages to the global name_crc hash table */
+  sm->msg_id_base = setup_message_id_table ();
+
+  return 0;
+}
+
+VLIB_INIT_FUNCTION (subscriber_init);
 
 /*
  * fd.io coding-style-patch-verification: ON
