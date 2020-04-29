@@ -1,0 +1,4 @@
+subscriber_error (DECAPSULATED, "good packets decapsulated")
+subscriber_error (CONTROL_PLANE, "control plane packet")
+subscriber_error (NO_SUCH_SESSION, "no such sessions")
+subscriber_error (BAD_VER_TYPE, "bad version and type in pppoe header")

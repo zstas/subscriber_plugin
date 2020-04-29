@@ -25,6 +25,66 @@
 #include <vppinfra/hash.h>
 #include <vppinfra/error.h>
 
+typedef struct
+{
+  /* Required for pool_get_aligned  */
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+
+  u32 session_id;
+
+  /* session client addresses */
+  ip46_address_t client_ip;
+
+  /* the index of tx interface for pppoe encaped packet */
+  u32 encap_if_index;
+
+  /** FIB indices - inner IP packet lookup here */
+  u32 decap_fib_index;
+
+  u8 local_mac[6];
+  u8 client_mac[6];
+
+  u16 outer_vlan;
+  u16 inner_vlan;
+
+  /* vnet intfc index */
+  u32 sw_if_index;
+  u32 hw_if_index;
+
+} subscriber_session_t;
+
+/* *INDENT-OFF* */
+typedef struct
+{
+  union
+  {
+    struct
+    {
+      u8 mac[6];
+      u16 outer_vlan;
+      u16 inner_vlan;
+    } fields;
+    u64 raw;
+  };
+} subscriber_entry_key_t;
+/* *INDENT-ON* */
+
+/* *INDENT-OFF* */
+typedef struct
+{
+  union
+  {
+    struct
+    {
+      u32 sw_if_index;
+      u32 session_index;
+    } fields;
+    u64 raw;
+  };
+}  subscriber_entry_result_t;
+/* *INDENT-ON* */
+
+
 typedef struct {
     /* API message ID base */
     u16 msg_id_base;
@@ -34,15 +94,18 @@ typedef struct {
     /* Node index, non-zero if the periodic process has been created */
     u32 periodic_node_index;
 
-      /**
+  /**
    * Hash mapping parent sw_if_index and client mac address to p2p_ethernet sub-interface
    */
-  uword * p2p_ethernet_by_key;
+  u32 *subscriber_by_key;
 
-  u32 *p2p_ethernet_by_sw_if_index;
+  u32 *subscriber_by_sw_if_index;
 
   // Pool of p2p subifs;
-  subint_config_t *p2p_subif_pool;
+  subscriber_session_t *sessions;
+
+  /* Free vlib hw_if_indices */
+  u32 *free_subscriber_session_hw_if_indices;
 
     /* convenience */
     vlib_main_t * vlib_main;
@@ -63,7 +126,7 @@ typedef struct {
   u32 hw_if_index;
   u16 outer_vlan;
   u16 inner_vlan;
-} p2p_key_t;
+} subscriber_key_t;
 
 extern vlib_node_registration_t subscriber_node;
 extern vlib_node_registration_t subscriber_periodic_node;
@@ -74,6 +137,11 @@ extern vlib_node_registration_t subscriber_periodic_node;
 #define SUBSCRIBER_EVENT_PERIODIC_ENABLE_DISABLE 3
 
 void subscriber_create_periodic_process (subscriber_main_t *);
+subscriber_entry_result_t* subscriber_lookup (u32 parent_if_index, u8 * client_mac, u16 outer_vlan, u16 inner_vlan);
+
+u8 * format_subscriber_header_with_length (u8 * s, va_list * args);
+u8 * subscriber_build_rewrite (vnet_main_t * vnm,u32 sw_if_index,vnet_link_t link_type, const void *dst_address);
+void subscriber_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai);
 
 #endif /* __included_subscriber_h__ */
 

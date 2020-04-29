@@ -77,6 +77,7 @@ static char * subscriber_error_strings[] =
 
 #define foreach_subscriber_input_next  \
 _(DROP, "error-drop")                  \
+_(CP_INPUT, "cp-input")                \
 _(IP4_INPUT, "ip4-input")              \
 _(IP6_INPUT, "ip6-input" )             \
 
@@ -87,6 +88,21 @@ typedef enum
   #undef _
   SUBSCRIBER_N_NEXT,
 } subscriber_next_t;
+
+typedef enum
+{
+#define subscriber_error(n,s) SUBSCRIBER_ERROR_##n,
+#include <subscriber/subscriber_error.def>
+#undef subscriber_error
+  PPPOE_N_ERROR,
+} subscriber_input_error_t;
+
+// static char * subcsriber_error_strings[] = {
+// #define subscriber_error(n,s) s,
+// #include <subscriber/subscriber_error.def>
+// #undef subscriber_error
+// #undef _
+// };
 
 #define foreach_mac_address_offset              \
 _(0)                                            \
@@ -101,13 +117,26 @@ VLIB_NODE_FN (subscriber_node) (vlib_main_t * vm,
 		  vlib_node_runtime_t * node,
 		  vlib_frame_t * frame)
 {
-  u32 n_left_from, * from, * to_next;
-  subscriber_next_t next_index;
-  u32 pkts_swapped = 0;
+  u32 n_left_from, next_index, * from, * to_next;
+  subscriber_main_t * sm = &subscriber_main;
+  vnet_main_t * vnm = sm->vnet_main;
+  vnet_interface_main_t * im = &vnm->interface_main;
+  u32 pkts_decapsulated = 0;
+  u32 thread_index = vlib_get_thread_index();
+  u32 stats_sw_if_index, stats_n_packets, stats_n_bytes;
+  // subscriber_entry_key_t cached_key;
+  // subscriber_entry_result_t cached_result;
 
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
+
+  /* Clear the one-entry cache in case session table was updated */
+  // cached_key.raw = ~0;
+  // cached_result.raw = ~0;	/* warning be gone */
+
   next_index = node->cached_next_index;
+  stats_sw_if_index = node->runtime_data[0];
+  stats_n_packets = stats_n_bytes = 0;
 
   while (n_left_from > 0)
     {
@@ -115,120 +144,21 @@ VLIB_NODE_FN (subscriber_node) (vlib_main_t * vm,
 
       vlib_get_next_frame (vm, node, next_index,
 			   to_next, n_left_to_next);
-
-      while (n_left_from >= 4 && n_left_to_next >= 2)
-	{
-          u32 next0 = SUBSCRIBER_NEXT_INTERFACE_OUTPUT;
-          u32 next1 = SUBSCRIBER_NEXT_INTERFACE_OUTPUT;
-          u32 sw_if_index0, sw_if_index1;
-          u8 tmp0[6], tmp1[6];
-          ethernet_header_t *en0, *en1;
-          u32 bi0, bi1;
-	  vlib_buffer_t * b0, * b1;
-          
-	  /* Prefetch next iteration. */
-	  {
-	    vlib_buffer_t * p2, * p3;
-            
-	    p2 = vlib_get_buffer (vm, from[2]);
-	    p3 = vlib_get_buffer (vm, from[3]);
-            
-	    vlib_prefetch_buffer_header (p2, LOAD);
-	    vlib_prefetch_buffer_header (p3, LOAD);
-
-	    CLIB_PREFETCH (p2->data, CLIB_CACHE_LINE_BYTES, STORE);
-	    CLIB_PREFETCH (p3->data, CLIB_CACHE_LINE_BYTES, STORE);
-	  }
-
-          /* speculatively enqueue b0 and b1 to the current next frame */
-	  to_next[0] = bi0 = from[0];
-	  to_next[1] = bi1 = from[1];
-	  from += 2;
-	  to_next += 2;
-	  n_left_from -= 2;
-	  n_left_to_next -= 2;
-
-	  b0 = vlib_get_buffer (vm, bi0);
-	  b1 = vlib_get_buffer (vm, bi1);
-
-          ASSERT (b0->current_data == 0);
-          ASSERT (b1->current_data == 0);
-          
-          en0 = vlib_buffer_get_current (b0);
-          en1 = vlib_buffer_get_current (b1);
-
-          /* This is not the fastest way to swap src + dst mac addresses */
-#define _(a) tmp0[a] = en0->src_address[a];
-          foreach_mac_address_offset;
-#undef _
-#define _(a) en0->src_address[a] = en0->dst_address[a];
-          foreach_mac_address_offset;
-#undef _
-#define _(a) en0->dst_address[a] = tmp0[a];
-          foreach_mac_address_offset;
-#undef _
-
-#define _(a) tmp1[a] = en1->src_address[a];
-          foreach_mac_address_offset;
-#undef _
-#define _(a) en1->src_address[a] = en1->dst_address[a];
-          foreach_mac_address_offset;
-#undef _
-#define _(a) en1->dst_address[a] = tmp1[a];
-          foreach_mac_address_offset;
-#undef _
-
-          sw_if_index0 = vnet_buffer(b0)->sw_if_index[VLIB_RX];
-          sw_if_index1 = vnet_buffer(b1)->sw_if_index[VLIB_RX];
-
-          /* Send pkt back out the RX interface */
-          vnet_buffer(b0)->sw_if_index[VLIB_TX] = sw_if_index0;
-          vnet_buffer(b1)->sw_if_index[VLIB_TX] = sw_if_index1;
-
-          pkts_swapped += 2;
-
-          if (PREDICT_FALSE((node->flags & VLIB_NODE_FLAG_TRACE)))
-            {
-              if (b0->flags & VLIB_BUFFER_IS_TRACED) 
-                {
-                    subscriber_trace_t *t = 
-                      vlib_add_trace (vm, node, b0, sizeof (*t));
-                    t->sw_if_index = sw_if_index0;
-                    t->next_index = next0;
-                    clib_memcpy (t->new_src_mac, en0->src_address,
-                                 sizeof (t->new_src_mac));
-                    clib_memcpy (t->new_dst_mac, en0->dst_address,
-                                 sizeof (t->new_dst_mac));
-                  }
-                if (b1->flags & VLIB_BUFFER_IS_TRACED) 
-                  {
-                    subscriber_trace_t *t = 
-                      vlib_add_trace (vm, node, b1, sizeof (*t));
-                    t->sw_if_index = sw_if_index1;
-                    t->next_index = next1;
-                    clib_memcpy (t->new_src_mac, en1->src_address,
-                                 sizeof (t->new_src_mac));
-                    clib_memcpy (t->new_dst_mac, en1->dst_address,
-                                 sizeof (t->new_dst_mac));
-                  }
-              }
-            
-            /* verify speculative enqueues, maybe switch current next frame */
-            vlib_validate_buffer_enqueue_x2 (vm, node, next_index,
-                                             to_next, n_left_to_next,
-                                             bi0, bi1, next0, next1);
-        }
-
       while (n_left_from > 0 && n_left_to_next > 0)
 	{
-          u32 bi0;
+	  u32 bi0;
 	  vlib_buffer_t * b0;
-          u32 next0 = SUBSCRIBER_NEXT_INTERFACE_OUTPUT;
-          u32 sw_if_index0;
-          u8 tmp0[6];
-          ethernet_header_t *en0;
+	  u32 next0;
+	  ethernet_header_t *h0;
+    subscriber_session_t * t0;
+    u32 error0;
+	  u32 sw_if_index0, len0;
+	  //subscriber_entry_key_t key0;
+	  subscriber_entry_result_t *result0;
+	  //u32 bucket0;
+    u16 outer_vlan = ~0;
+    u16 inner_vlan = ~0;
 
-          /* speculatively enqueue b0 to the current next frame */
 	  bi0 = from[0];
 	  to_next[0] = bi0;
 	  from += 1;
@@ -237,45 +167,78 @@ VLIB_NODE_FN (subscriber_node) (vlib_main_t * vm,
 	  n_left_to_next -= 1;
 
 	  b0 = vlib_get_buffer (vm, bi0);
-          /* 
-           * Direct from the driver, we should be at offset 0
-           * aka at &b0->data[0]
-           */
-          ASSERT (b0->current_data == 0);
-          
-          en0 = vlib_buffer_get_current (b0);
+	  error0 = 0;
 
-          /* This is not the fastest way to swap src + dst mac addresses */
-#define _(a) tmp0[a] = en0->src_address[a];
-          foreach_mac_address_offset;
-#undef _
-#define _(a) en0->src_address[a] = en0->dst_address[a];
-          foreach_mac_address_offset;
-#undef _
-#define _(a) en0->dst_address[a] = tmp0[a];
-          foreach_mac_address_offset;
-#undef _
+          /* leaves current_data pointing at the pppoe header */
+          h0 = vlib_buffer_get_current (b0);
 
-          sw_if_index0 = vnet_buffer(b0)->sw_if_index[VLIB_RX];
-
-          /* Send pkt back out the RX interface */
-          vnet_buffer(b0)->sw_if_index[VLIB_TX] = sw_if_index0;
-
-          if (PREDICT_FALSE((node->flags & VLIB_NODE_FLAG_TRACE) 
-                            && (b0->flags & VLIB_BUFFER_IS_TRACED))) {
-            subscriber_trace_t *t = 
-               vlib_add_trace (vm, node, b0, sizeof (*t));
-            t->sw_if_index = sw_if_index0;
-            t->next_index = next0;
-            clib_memcpy (t->new_src_mac, en0->src_address,
-                         sizeof (t->new_src_mac));
-            clib_memcpy (t->new_dst_mac, en0->dst_address,
-                         sizeof (t->new_dst_mac));
+          if ((h0->type != ETHERNET_TYPE_IP4)
+             && (h0->type != ETHERNET_TYPE_IP6))
+            {
+	      error0 = SUBSCRIBER_ERROR_CONTROL_PLANE;
+	      next0 = SUBSCRIBER_INPUT_NEXT_CP_INPUT;
+	      goto trace00;
             }
-            
-          pkts_swapped += 1;
+    sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 
-          /* verify speculative enqueue, maybe switch current next frame */
+    if (h0->type == ETHERNET_TYPE_VLAN){
+		  u16 *vlan_tag = (u16 *) (h0 + 1);
+		  outer_vlan = 0xFF0F & (*vlan_tag); // vlan id in nbo
+		  if( *(vlan_tag + 1) == ETHERNET_TYPE_VLAN ) {
+			  u16 *inner_vlan_tag = (u16 *) (vlan_tag + 2);
+			  inner_vlan = 0xFF0F & (*inner_vlan_tag);
+		  }
+	  }
+
+    result0 = subscriber_lookup (sw_if_index0, h0->src_address, outer_vlan, inner_vlan);
+
+          if (PREDICT_FALSE (result0->fields.session_index == ~0))
+	    {
+	      error0 = SUBSCRIBER_ERROR_NO_SUCH_SESSION;
+	      next0 = SUBSCRIBER_INPUT_NEXT_DROP;
+	      goto trace00;
+	    }
+
+	  t0 = pool_elt_at_index (sm->sessions,
+				  result0->fields.session_index);
+
+	  /* Pop Eth header*/
+	  vlib_buffer_advance(b0, sizeof(*h0));
+
+	  next0 = (h0->type==ETHERNET_TYPE_IP4)?
+		  SUBSCRIBER_INPUT_NEXT_IP4_INPUT
+		  : SUBSCRIBER_INPUT_NEXT_IP6_INPUT;
+
+	  sw_if_index0 = t0->sw_if_index;
+	  len0 = vlib_buffer_length_in_chain (vm, b0);
+
+          pkts_decapsulated ++;
+          stats_n_packets += 1;
+          stats_n_bytes += len0;
+
+	  /* Batch stats increment on the same pppoe session so counter
+	     is not incremented per packet */
+	  if (PREDICT_FALSE (sw_if_index0 != stats_sw_if_index))
+	    {
+	      stats_n_packets -= 1;
+	      stats_n_bytes -= len0;
+	      if (stats_n_packets)
+		vlib_increment_combined_counter
+		  (im->combined_sw_if_counters + VNET_INTERFACE_COUNTER_RX,
+		   thread_index, stats_sw_if_index,
+		   stats_n_packets, stats_n_bytes);
+	      stats_n_packets = 1;
+	      stats_n_bytes = len0;
+	      stats_sw_if_index = sw_if_index0;
+	    }
+
+        trace00:
+          b0->error = error0 ? node->errors[error0] : 0;
+
+          if (PREDICT_FALSE(b0->flags & VLIB_BUFFER_IS_TRACED))
+            {
+              //traced TODO
+            }
 	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
 					   to_next, n_left_to_next,
 					   bi0, next0);
@@ -283,9 +246,20 @@ VLIB_NODE_FN (subscriber_node) (vlib_main_t * vm,
 
       vlib_put_next_frame (vm, node, next_index, n_left_to_next);
     }
+  /* Do we still need this now that session tx stats is kept? */
+  vlib_node_increment_counter (vm, subscriber_node.index,
+                               SUBSCRIBER_ERROR_DECAPSULATED,
+                               pkts_decapsulated);
 
-  vlib_node_increment_counter (vm, subscriber_node.index, 
-                               SUBSCRIBER_ERROR_SWAPPED, pkts_swapped);
+  /* Increment any remaining batch stats */
+  if (stats_n_packets)
+    {
+      vlib_increment_combined_counter
+	(im->combined_sw_if_counters + VNET_INTERFACE_COUNTER_RX,
+	 thread_index, stats_sw_if_index, stats_n_packets, stats_n_bytes);
+      node->runtime_data[0] = stats_sw_if_index;
+    }
+
   return frame->n_vectors;
 }
 
@@ -298,7 +272,7 @@ VLIB_REGISTER_NODE (subscriber_node) =
   .format_trace = format_subscriber_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
   
-  .n_errors = ARRAY_LEN(subscriber_error_strings),
+  .n_errors = SUBSCRIBER_N_ERROR,
   .error_strings = subscriber_error_strings,
 
   .n_next_nodes = SUBSCRIBER_N_NEXT,
@@ -311,11 +285,3 @@ VLIB_REGISTER_NODE (subscriber_node) =
   },
 };
 #endif /* CLIB_MARCH_VARIANT */
-/* *INDENT-ON* */
-/*
- * fd.io coding-style-patch-verification: ON
- *
- * Local Variables:
- * eval: (c-set-style "gnu")
- * End:
- */
