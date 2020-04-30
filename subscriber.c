@@ -28,6 +28,8 @@
 #include <stdbool.h>
 #include <vnet/adj/adj_midchain.h>
 #include <vnet/adj/adj_mcast.h>
+#include <vnet/fib/fib_entry.h>
+#include <vnet/fib/fib_table.h>
 #include <vnet/dpo/interface_tx_dpo.h>
 #include <vnet/interface_funcs.h>
 
@@ -40,7 +42,7 @@
 #include <vnet/api_errno.h>
 
 subscriber_main_t subscriber_main;
-
+static fib_source_t subscriber_fib_src;
 
 static u8 *
 format_subscriber (u8 * s, va_list * args)
@@ -182,6 +184,18 @@ susbcriber_add_del (u32 parent_if_index, u8 * client_mac,
 	sub_key = clib_mem_alloc (sizeof (*sub_key));
 	create_subscriber_key (sub_key, parent_if_index, client_mac, outer_vlan, inner_vlan);
 	hash_set_mem (sm->subscriber_by_key, sub_key, sw_if_index);
+
+  fib_prefix_t pfx;
+
+  pfx.fp_addr.ip4.as_u32 = client_ip.ip4.as_u32;
+  pfx.fp_len = 32;
+  pfx.fp_proto = FIB_PROTOCOL_IP4;
+
+  fib_table_entry_path_add (0, &pfx, // TODO fib
+				subscriber_fib_src, FIB_ENTRY_FLAG_NONE,
+				fib_proto_to_dpo (pfx.fp_proto),
+				&pfx.fp_addr, sw_if_index, ~0,
+				1, NULL, FIB_ROUTE_PATH_FLAG_NONE);
 
   return 0;
 }
@@ -566,6 +580,10 @@ subscriber_init (vlib_main_t * vm)
 
   /* Add our API messages to the global name_crc hash table */
   sm->msg_id_base = setup_message_id_table ();
+
+  subscriber_fib_src = fib_source_allocate ("ipsession",
+				       FIB_SOURCE_PRIORITY_HI,
+				       FIB_SOURCE_BH_API);
 
   return 0;
 }
