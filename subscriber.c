@@ -61,11 +61,75 @@ susbcriber_interface_admin_up_down (vnet_main_t * vnm, u32 hw_if_index, u32 flag
   return /* no error */ 0;
 }
 
+// static uword dummy_interface_tx (vlib_main_t * vm,
+//                                  vlib_node_runtime_t * node,
+//                                  vlib_frame_t * frame)
+// {
+//   u32 next_index;
+//   u32 * from, * to_next, n_left_from, n_left_to_next;
+
+//   subscriber_main_t *sub_main = &subscriber_main;
+
+//   /* Vector of buffer / pkt indices we're supposed to process */
+//   from = vlib_frame_vector_args (frame);
+
+//   /* Number of buffers / pkts */
+//   n_left_from = frame->n_vectors;
+
+//   /* Speculatively send the first buffer to the last disposition we used */
+//   next_index = node->cached_next_index;
+
+//   while (n_left_from > 0)
+//     {
+//       /* set up to enqueue to our disposition with index = next_index */
+//       vlib_get_next_frame (vm, node, next_index, to_next, n_left_to_next);
+
+//       /*
+//        * FIXME DUAL LOOP
+//        */
+//       while (n_left_from > 0 && n_left_to_next > 0)
+//         {
+//           vlib_buffer_t * b0;
+//           u32 bi0;
+
+//           bi0 = from[0];
+//           to_next[0] = bi0;
+//           from += 1;
+//           to_next += 1;
+//           n_left_from -= 1;
+//           n_left_to_next -= 1;
+//           u32 sw_if_index0;
+
+//           b0 = vlib_get_buffer(vm, bi0);
+
+//           sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
+
+//           subscriber_session_t *sess;
+//           u32 session_id;
+
+//           session_id = sub_main->subscriber_by_sw_if_index[sw_if_index0];
+//           sess = pool_elt_at_index (sub_main->sessions, session_id);
+
+//           //vnet_buffer(b0)->sw_if_index[VLIB_TX] = sess->encap_if_index;
+//           vnet_buffer(b0)->ip.adj_index[VLIB_TX] = sess->dpo.dpoi_index;
+
+//           vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
+//                                            to_next, n_left_to_next,
+//                                            bi0, sess->dpo.dpoi_next_node);
+//         }
+
+//       vlib_put_next_frame (vm, node, next_index, n_left_to_next);
+//     }
+
+//   return frame->n_vectors;
+// }
+
 /* *INDENT-OFF* */
 VNET_DEVICE_CLASS (subscriber_device_class,static) = {
   .name = "ipsubscriber",
   .format_device_name = format_subscriber,
   .admin_up_down_function = susbcriber_interface_admin_up_down,
+  // .tx_function = dummy_interface_tx,
 };
 /* *INDENT-ON* */
 
@@ -172,6 +236,7 @@ susbcriber_add_del (u32 parent_if_index, u8 * client_mac,
 	  hi = vnet_get_hw_interface (vnm, hw_if_index);
   }
   t->sw_if_index = sw_if_index = hi->sw_if_index;
+  vec_add (hi->hw_address, t->local_mac, 6);
 
   vec_validate_init_empty (sm->subscriber_by_sw_if_index, sw_if_index, ~0);
   sm->subscriber_by_sw_if_index[sw_if_index] = t - sm->sessions;
@@ -512,7 +577,7 @@ void
 subscriber_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
 {
   subscriber_main_t *sub_main = &subscriber_main;
-  dpo_id_t dpo = DPO_INVALID;
+  //dpo_id_t dpo = DPO_INVALID;
   ip_adjacency_t *adj;
   subscriber_session_t *sess;
   u32 session_id;
@@ -561,11 +626,12 @@ subscriber_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
     }
 
   interface_tx_dpo_add_or_lock (vnet_link_to_dpo_proto (adj->ia_link),
-				sess->encap_if_index, &dpo);
+				sess->encap_if_index, &sess->dpo);
 
-  adj_nbr_midchain_stack (ai, &dpo);
 
-  dpo_reset (&dpo);
+  adj_nbr_midchain_stack (ai, &sess->dpo);
+
+  //dpo_reset (&dpo);
 }
 
 

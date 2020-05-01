@@ -75,20 +75,6 @@ static char * subscriber_error_strings[] =
 };
 #endif /* CLIB_MARCH_VARIANT */
 
-#define foreach_subscriber_input_next  \
-_(DROP, "error-drop")                  \
-_(IP4_INPUT, "ip4-input")              \
-_(IP6_INPUT, "ip6-input" )             \
-
-//_(CP_INPUT, "cp-input")              
-
-typedef enum 
-{
-  #define _(s,n) SUBSCRIBER_INPUT_NEXT_##s,
-  foreach_subscriber_input_next
-  #undef _
-  SUBSCRIBER_N_NEXT,
-} subscriber_next_t;
 
 typedef enum
 {
@@ -154,11 +140,10 @@ VLIB_NODE_FN (subscriber_node) (vlib_main_t * vm,
     subscriber_session_t * t0;
     u32 error0;
 	  u32 sw_if_index0, len0;
-	  //subscriber_entry_key_t key0;
 	  subscriber_entry_result_t *result0;
-	  //u32 bucket0;
     u16 outer_vlan = ~0;
     u16 inner_vlan = ~0;
+    u16 type0;
 
 	  bi0 = from[0];
 	  to_next[0] = bi0;
@@ -170,20 +155,13 @@ VLIB_NODE_FN (subscriber_node) (vlib_main_t * vm,
 	  b0 = vlib_get_buffer (vm, bi0);
 	  error0 = 0;
 
-          /* leaves current_data pointing at the pppoe header */
-          h0 = vlib_buffer_get_current (b0);
+    h0 = vlib_buffer_get_current (b0);
+    type0 = clib_net_to_host_u16(h0->type);
+    vnet_buffer (b0)->l2_hdr_offset = b0->current_data;
 
-          if ((h0->type != clib_host_to_net_u16( ETHERNET_TYPE_IP4))
-             && (h0->type != clib_host_to_net_u16( ETHERNET_TYPE_IP6)))
-            {
-	      error0 = SUBSCRIBER_ERROR_CONTROL_PLANE;
-	      //next0 = SUBSCRIBER_INPUT_NEXT_CP_INPUT;
-        next0 = SUBSCRIBER_INPUT_NEXT_DROP;
-	      goto trace00;
-            }
     sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 
-    if (h0->type == clib_host_to_net_u16( ETHERNET_TYPE_VLAN)){
+    if (type0 == ETHERNET_TYPE_VLAN){
 		  u16 *vlan_tag = (u16 *) (h0 + 1);
 		  outer_vlan = 0xFF0F & (*vlan_tag); // vlan id in nbo
 		  if( *(vlan_tag + 1) == clib_host_to_net_u16( ETHERNET_TYPE_VLAN) ) {
@@ -204,22 +182,37 @@ VLIB_NODE_FN (subscriber_node) (vlib_main_t * vm,
 	  t0 = pool_elt_at_index (sm->sessions,
 				  result0->fields.session_index);
 
-	  /* Pop Eth header*/
-	  vlib_buffer_advance(b0, sizeof(*h0));
+    sw_if_index0 = t0->sw_if_index;
+    vnet_buffer (b0)->sw_if_index[VLIB_RX] = sw_if_index0;
 
-	  next0 = (h0->type==clib_host_to_net_u16(ETHERNET_TYPE_IP4))?
-		  SUBSCRIBER_INPUT_NEXT_IP4_INPUT
-		  : SUBSCRIBER_INPUT_NEXT_IP6_INPUT;
+    switch( type0 ) {
+    case ETHERNET_TYPE_IP4:
+      next0 = SUBSCRIBER_INPUT_NEXT_IP4_INPUT;
+      vlib_buffer_advance(b0, sizeof(*h0));
+      break;
+    case ETHERNET_TYPE_IP6:
+      next0 = SUBSCRIBER_INPUT_NEXT_IP6_INPUT;
+      vlib_buffer_advance(b0, sizeof(*h0));
+      break;
+    case ETHERNET_TYPE_ARP:
+      next0 = SUBSCRIBER_INPUT_NEXT_ARP_INPUT;
+      u32 eth_start = vnet_buffer (b0)->l2_hdr_offset;
+      vnet_buffer (b0)->l2.l2_len = b0->current_data - eth_start;
+      vnet_buffer (b0)->sw_if_index[VLIB_RX] = t0->encap_if_index;
+      vlib_buffer_advance(b0, sizeof(*h0));
+      break;
+    default:
+      next0 = SUBSCRIBER_INPUT_NEXT_DROP;
+      goto trace00;
+    }
 
-	  sw_if_index0 = t0->sw_if_index;
+	  
 	  len0 = vlib_buffer_length_in_chain (vm, b0);
 
           pkts_decapsulated ++;
           stats_n_packets += 1;
           stats_n_bytes += len0;
-
-    vnet_buffer (b0)->sw_if_index[VLIB_RX] = sw_if_index0;
-
+    
 	  /* Batch stats increment on the same pppoe session so counter
 	     is not incremented per packet */
 	  if (PREDICT_FALSE (sw_if_index0 != stats_sw_if_index))

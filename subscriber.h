@@ -25,6 +25,23 @@
 #include <vppinfra/hash.h>
 #include <vppinfra/error.h>
 
+#define foreach_subscriber_input_next  \
+_(DROP, "error-drop")                  \
+_(IP4_INPUT, "ip4-input")              \
+_(IP6_INPUT, "ip6-input")              \
+_(ARP_INPUT, "arp-input")              \
+_(INTERFACE, "interface-output" )      \
+//_(CP_INPUT, "cp-input")              
+
+typedef enum 
+{
+  #define _(s,n) SUBSCRIBER_INPUT_NEXT_##s,
+  foreach_subscriber_input_next
+  #undef _
+  SUBSCRIBER_N_NEXT,
+} subscriber_next_t;
+
+
 typedef struct
 {
   /* Required for pool_get_aligned  */
@@ -50,6 +67,8 @@ typedef struct
   /* vnet intfc index */
   u32 sw_if_index;
   u32 hw_if_index;
+
+  dpo_id_t dpo;
 
 } subscriber_session_t;
 
