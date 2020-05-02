@@ -198,7 +198,7 @@ VLIB_NODE_FN (subscriber_node) (vlib_main_t * vm,
       next0 = SUBSCRIBER_INPUT_NEXT_ARP_INPUT;
       u32 eth_start = vnet_buffer (b0)->l2_hdr_offset;
       vnet_buffer (b0)->l2.l2_len = b0->current_data - eth_start;
-      vnet_buffer (b0)->sw_if_index[VLIB_RX] = t0->encap_if_index;
+      //vnet_buffer (b0)->sw_if_index[VLIB_RX] = t0->encap_if_index;
       vlib_buffer_advance(b0, sizeof(*h0));
       break;
     default:
