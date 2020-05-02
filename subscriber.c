@@ -111,7 +111,7 @@ static uword dummy_interface_tx (vlib_main_t * vm,
       sess = pool_elt_at_index (sub_main->sessions, session_id);
 
       vnet_buffer (b0)->sw_if_index[VLIB_TX] = sess->encap_if_index;
-      //vnet_buffer (b0)->ip.adj_index[VLIB_TX] = sess->dpo.dpoi_index;
+
       if( sess->outer_vlan != (u16)~0) {
         word offset = -4;
         if( sess->inner_vlan != (u16)~0) {
@@ -174,19 +174,19 @@ create_subscriber_key (subscriber_key_t * p2pe_key, u32 parent_if_index, u8 * cl
   p2pe_key->outer_vlan = outer_vlan;
 }
 
-subscriber_entry_result_t*
+u32
 subscriber_lookup (u32 parent_if_index, u8 * client_mac, u16 outer_vlan, u16 inner_vlan)
 {
   subscriber_main_t *sub_main = &subscriber_main;
   subscriber_key_t subs_key;
-  subscriber_entry_result_t *p;
+  uword *p;
 
   create_subscriber_key (&subs_key, parent_if_index, client_mac, outer_vlan, inner_vlan);
-  p = (subscriber_entry_result_t*)hash_get (sub_main->subscriber_by_key, &subs_key);
+  p = hash_get_mem (sub_main->subscriber_by_key, &subs_key);
   if (p)
-    return p;
+    return p[0];
 
-  return NULL;
+  return ~0;
 }
 
 int subscriber_enable_disable (subscriber_main_t * smp, u32 sw_if_index,
@@ -221,7 +221,7 @@ int subscriber_enable_disable (subscriber_main_t * smp, u32 sw_if_index,
 int
 susbcriber_add_del (u32 parent_if_index, u8 * client_mac, 
                     ip46_address_t client_ip, 
-                    int is_add, u16 outer_vlan, u16 inner_vlan)
+                    int is_add, u16 outer_vlan, u16 inner_vlan, u32 *session_sw_if_index)
 {
   vnet_main_t *vnm = vnet_get_main ();
   vlib_main_t *vm = vlib_get_main();
@@ -232,28 +232,90 @@ susbcriber_add_del (u32 parent_if_index, u8 * client_mac,
   u32 sw_if_index = ~0;
   vnet_hw_interface_t *hi;
 
+  fib_prefix_t pfx;
+  clib_memset (&pfx, 0, sizeof (pfx));
+  pfx.fp_addr.ip4.as_u32 = client_ip.ip4.as_u32;
+  pfx.fp_len = 32;
+  pfx.fp_proto = FIB_PROTOCOL_IP4;
+
   hi = vnet_get_hw_interface (vnm, parent_if_index);
 
-  // u32 subscriber_if_index = ~0;
-  // subscriber_if_index = subscriber_lookup (parent_if_index, client_mac, outer_vlan, inner_vlan);
+  subscriber_key_t sub_key;
+  create_subscriber_key( &sub_key, parent_if_index, client_mac, clib_host_to_net_u16( outer_vlan), clib_host_to_net_u16( inner_vlan) );
+  uword *lookup = hash_get_mem(sm->subscriber_by_key, &sub_key);
+
+  if( is_add == 0 ) {
+    /* deleting a session: session must exist */
+
+    if (lookup == NULL)
+	    return VNET_API_ERROR_NO_SUCH_ENTRY;
+
+    t = pool_elt_at_index (sm->sessions, *lookup);
+
+    vnet_sw_interface_set_flags (vnm, t->sw_if_index, 0 /* down */ );
+    vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, t->sw_if_index);
+    si->flags |= VNET_SW_INTERFACE_FLAG_HIDDEN;
+
+    vec_add1 (sm->free_subscriber_session_hw_if_indices, t->hw_if_index);
+
+    //sm->subscriber_by_sw_if_index[t->sw_if_index] = ~0;
+    hash_unset(sm->subscriber_by_sw_if_index, t->sw_if_index);
+    hash_unset(sm->subscriber_by_key, &sub_key );
+
+    /* delete reverse route for client ip */
+    fib_table_entry_path_remove (0, &pfx,
+			   subscriber_fib_src,
+			   fib_proto_to_dpo (pfx.fp_proto),
+			   &pfx.fp_addr,
+			   sw_if_index, ~0, 1,
+			   FIB_ROUTE_PATH_FLAG_NONE);
+
+    pool_put (sm->sessions, t);
+    return 0;
+  }
+
+  if (lookup != NULL)
+	  return VNET_API_ERROR_TUNNEL_EXIST;
 
   // actually adding a new session
   pool_get_aligned (sm->sessions, t, CLIB_CACHE_LINE_BYTES);
+  u32 session_id = t - sm->sessions;
   clib_memset (t, 0, sizeof (*t));
   clib_memcpy (t->local_mac, hi->hw_address, 6);
   clib_memcpy (t->client_mac, client_mac, 6);
   t->outer_vlan = clib_host_to_net_u16( outer_vlan );
   t->inner_vlan = clib_host_to_net_u16( inner_vlan );
   t->encap_if_index = parent_if_index;
-  t->session_id = t - sm->sessions;
+  t->session_id = session_id;
   t->client_ip = client_ip;
 
   if (vec_len (sm->free_subscriber_session_hw_if_indices) > 0) {
-    // TODO
+    vnet_interface_main_t *im = &vnm->interface_main;
+	  hw_if_index = sm->free_subscriber_session_hw_if_indices
+	    [vec_len (sm->free_subscriber_session_hw_if_indices) - 1];
+	  _vec_len (sm->free_subscriber_session_hw_if_indices) -= 1;
+
+	  hi = vnet_get_hw_interface (vnm, hw_if_index);
+	  hi->dev_instance = session_id;
+	  hi->hw_instance = hi->dev_instance;
+
+	  /* clear old stats of freed session before reuse */
+	  sw_if_index = hi->sw_if_index;
+	  vnet_interface_counter_lock (im);
+	  vlib_zero_combined_counter
+	    (&im->combined_sw_if_counters[VNET_INTERFACE_COUNTER_TX],
+	     sw_if_index);
+	  vlib_zero_combined_counter (&im->combined_sw_if_counters
+				      [VNET_INTERFACE_COUNTER_RX],
+				      sw_if_index);
+	  vlib_zero_simple_counter (&im->sw_if_counters
+				    [VNET_INTERFACE_COUNTER_DROP],
+				    sw_if_index);
+	  vnet_interface_counter_unlock (im);
   } else {
     hw_if_index = vnet_register_interface
-	    (vnm, subscriber_device_class.index, t - sm->sessions,
-	     subscriber_hw_class.index, t - sm->sessions);
+	    (vnm, subscriber_device_class.index, session_id,
+	     subscriber_hw_class.index, session_id);
 	  hi = vnet_get_hw_interface (vnm, hw_if_index);
 
     u32 slot;
@@ -263,33 +325,27 @@ susbcriber_add_del (u32 parent_if_index, u8 * client_mac,
       return ~0;
     t->out_slot = slot;
   }
+
+  t->hw_if_index = hw_if_index;
   t->sw_if_index = sw_if_index = hi->sw_if_index;
   vec_add (hi->hw_address, t->local_mac, 6);
 
   vec_validate_init_empty (sm->subscriber_by_sw_if_index, sw_if_index, ~0);
-  sm->subscriber_by_sw_if_index[sw_if_index] = t - sm->sessions;
+  sm->subscriber_by_sw_if_index[sw_if_index] = session_id;
 
   vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, sw_if_index);
   si->flags &= ~VNET_SW_INTERFACE_FLAG_HIDDEN;
   vnet_sw_interface_set_flags (vnm, sw_if_index, VNET_SW_INTERFACE_FLAG_ADMIN_UP);
 
-  subscriber_key_t *sub_key;
-	sub_key = clib_mem_alloc (sizeof (*sub_key));
-	create_subscriber_key (sub_key, t->encap_if_index, t->client_mac, t->outer_vlan, t->inner_vlan);
-	hash_set_mem (sm->subscriber_by_key, sub_key, sw_if_index);
-
-  fib_prefix_t pfx;
-  pfx.fp_addr.as_u64[ 0 ] = 0;
-  pfx.fp_addr.as_u64[ 1 ] = 0;
-  pfx.fp_addr.ip4.as_u32 = client_ip.ip4.as_u32;
-  pfx.fp_len = 32;
-  pfx.fp_proto = FIB_PROTOCOL_IP4;
+	hash_set(sm->subscriber_by_key, &sub_key, session_id);
 
   fib_table_entry_path_add (0, &pfx, // TODO fib
 				subscriber_fib_src, FIB_ENTRY_FLAG_CONNECTED,
 				fib_proto_to_dpo (pfx.fp_proto),
 				&pfx.fp_addr, sw_if_index, ~0,
 				1, NULL, FIB_ROUTE_PATH_FLAG_NONE);
+
+  *session_sw_if_index = sw_if_index;
 
   return 0;
 }
@@ -421,7 +477,7 @@ subscriber_create_delete_command_fn (vlib_main_t * vm,
       goto done;
     }
 
-  rv = susbcriber_add_del( sw_if_index, client_mac, client_ip, is_add, outer_vlan, inner_vlan );
+  rv = susbcriber_add_del( sw_if_index, client_mac, client_ip, is_add, outer_vlan, inner_vlan, &session_sw_if_index );
 
   switch (rv)
     {
@@ -701,6 +757,7 @@ subscriber_init (vlib_main_t * vm)
   sm->vlib_main = vm;
   sm->vnet_main = vnet_get_main ();
   sm->subscriber_by_key = hash_create_mem (0, sizeof (subscriber_key_t), sizeof (subscriber_entry_result_t));
+  sm->free_subscriber_session_hw_if_indices = 0;
 
   /* Add our API messages to the global name_crc hash table */
   sm->msg_id_base = setup_message_id_table ();

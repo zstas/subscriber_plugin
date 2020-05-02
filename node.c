@@ -140,7 +140,7 @@ VLIB_NODE_FN (subscriber_node) (vlib_main_t * vm,
     subscriber_session_t * t0;
     u32 error0;
 	  u32 sw_if_index0, len0;
-	  subscriber_entry_result_t *result0;
+	  u32 result0;
     u16 outer_vlan = ~0;
     u16 inner_vlan = ~0;
     u16 type0;
@@ -176,15 +176,14 @@ VLIB_NODE_FN (subscriber_node) (vlib_main_t * vm,
 
     result0 = subscriber_lookup (sw_if_index0, h0->src_address, outer_vlan, inner_vlan);
 
-          if (PREDICT_FALSE (result0 == 0 || result0->fields.session_index == ~0))
+          if (PREDICT_FALSE (result0 == ~0))
 	    {
 	      error0 = SUBSCRIBER_ERROR_NO_SUCH_SESSION;
 	      next0 = SUBSCRIBER_INPUT_NEXT_DROP;
 	      goto trace00;
 	    }
 
-	  t0 = pool_elt_at_index (sm->sessions,
-				  result0->fields.session_index);
+	  t0 = pool_elt_at_index (sm->sessions, result0);
 
     sw_if_index0 = t0->sw_if_index;
     vnet_buffer (b0)->sw_if_index[VLIB_RX] = sw_if_index0;

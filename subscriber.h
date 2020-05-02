@@ -156,7 +156,7 @@ extern vlib_node_registration_t subscriber_periodic_node;
 #define SUBSCRIBER_EVENT_PERIODIC_ENABLE_DISABLE 3
 
 void subscriber_create_periodic_process (subscriber_main_t *);
-subscriber_entry_result_t* subscriber_lookup (u32 parent_if_index, u8 * client_mac, u16 outer_vlan, u16 inner_vlan);
+u32 subscriber_lookup (u32 parent_if_index, u8 * client_mac, u16 outer_vlan, u16 inner_vlan);
 
 u8 * format_subscriber_header_with_length (u8 * s, va_list * args);
 u8 * subscriber_build_rewrite (vnet_main_t * vnm,u32 sw_if_index,vnet_link_t link_type, const void *dst_address);
