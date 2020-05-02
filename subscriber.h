@@ -68,7 +68,6 @@ typedef struct
   u32 sw_if_index;
   u32 hw_if_index;
 
-  dpo_id_t dpo;
   u32 out_slot;
 
 } subscriber_session_t;

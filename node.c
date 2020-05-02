@@ -164,9 +164,13 @@ VLIB_NODE_FN (subscriber_node) (vlib_main_t * vm,
     if (type0 == ETHERNET_TYPE_VLAN){
 		  u16 *vlan_tag = (u16 *) (h0 + 1);
 		  outer_vlan = 0xFF0F & (*vlan_tag); // vlan id in nbo
-		  if( *(vlan_tag + 1) == clib_host_to_net_u16( ETHERNET_TYPE_VLAN) ) {
+      u16 *outer_type = (u16 *) (vlan_tag + 1);
+      type0 = clib_net_to_host_u16( *outer_type );
+		  if( type0 == ETHERNET_TYPE_VLAN ) {
 			  u16 *inner_vlan_tag = (u16 *) (vlan_tag + 2);
 			  inner_vlan = 0xFF0F & (*inner_vlan_tag);
+        u16 *inner_type = (u16 *) (inner_vlan_tag + 1);
+        type0 = clib_net_to_host_u16( *inner_type );
 		  }
 	  }
 
@@ -185,21 +189,24 @@ VLIB_NODE_FN (subscriber_node) (vlib_main_t * vm,
     sw_if_index0 = t0->sw_if_index;
     vnet_buffer (b0)->sw_if_index[VLIB_RX] = sw_if_index0;
 
+    vlib_buffer_advance(b0, sizeof(*h0));
+    if( outer_vlan != (u16)~0 )
+      vlib_buffer_advance(b0, 4);
+    if( inner_vlan != (u16)~0 )
+      vlib_buffer_advance(b0, 4);
+
     switch( type0 ) {
     case ETHERNET_TYPE_IP4:
       next0 = SUBSCRIBER_INPUT_NEXT_IP4_INPUT;
-      vlib_buffer_advance(b0, sizeof(*h0));
       break;
     case ETHERNET_TYPE_IP6:
       next0 = SUBSCRIBER_INPUT_NEXT_IP6_INPUT;
-      vlib_buffer_advance(b0, sizeof(*h0));
       break;
     case ETHERNET_TYPE_ARP:
       next0 = SUBSCRIBER_INPUT_NEXT_ARP_INPUT;
-      u32 eth_start = vnet_buffer (b0)->l2_hdr_offset;
-      vnet_buffer (b0)->l2.l2_len = b0->current_data - eth_start;
-      //vnet_buffer (b0)->sw_if_index[VLIB_RX] = t0->encap_if_index;
-      vlib_buffer_advance(b0, sizeof(*h0));
+      // u32 eth_start = vnet_buffer (b0)->l2_hdr_offset;
+      // vnet_buffer (b0)->l2.l2_len = b0->current_data - eth_start;
+      
       break;
     default:
       next0 = SUBSCRIBER_INPUT_NEXT_DROP;

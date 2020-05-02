@@ -92,8 +92,15 @@ static uword dummy_interface_tx (vlib_main_t * vm,
       n_left_from -= 1;
       n_left_to_next -= 1;
       u32 sw_if_index0;
+      ethernet_header_t *h0;
+      u16 type0;
+      u8 l2hdr[12];
+
 
       b0 = vlib_get_buffer (vm, bi0);
+      h0 = vlib_buffer_get_current (b0);
+      type0 = h0->type;
+      clib_memcpy( l2hdr, h0->dst_address, 12 );
 
       sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 
@@ -105,6 +112,27 @@ static uword dummy_interface_tx (vlib_main_t * vm,
 
       vnet_buffer (b0)->sw_if_index[VLIB_TX] = sess->encap_if_index;
       //vnet_buffer (b0)->ip.adj_index[VLIB_TX] = sess->dpo.dpoi_index;
+      if( sess->outer_vlan != (u16)~0) {
+        word offset = -4;
+        if( sess->inner_vlan != (u16)~0) {
+          offset = -8;
+        }
+        vlib_buffer_advance (b0, offset );
+
+        h0 = vlib_buffer_get_current (b0);
+        clib_memcpy( h0->dst_address, l2hdr, 12 );
+        h0->type = 0x0081;
+        ethernet_vlan_header_t *vlan_hdr = (ethernet_vlan_header_t*)( h0 + 1 );
+        vlan_hdr->priority_cfi_and_id = sess->outer_vlan;
+        if( sess->inner_vlan == (u16)~0) {
+          vlan_hdr->type = type0;
+        } else {
+          vlan_hdr->type = 0x0081;
+          vlan_hdr += 1;
+          vlan_hdr->type = type0;
+          vlan_hdr->priority_cfi_and_id = sess->inner_vlan;
+        }
+      }
 
       vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
                                        n_left_to_next, bi0,
@@ -214,8 +242,8 @@ susbcriber_add_del (u32 parent_if_index, u8 * client_mac,
   clib_memset (t, 0, sizeof (*t));
   clib_memcpy (t->local_mac, hi->hw_address, 6);
   clib_memcpy (t->client_mac, client_mac, 6);
-  t->outer_vlan = outer_vlan;
-  t->inner_vlan = inner_vlan;
+  t->outer_vlan = clib_host_to_net_u16( outer_vlan );
+  t->inner_vlan = clib_host_to_net_u16( inner_vlan );
   t->encap_if_index = parent_if_index;
   t->session_id = t - sm->sessions;
   t->client_ip = client_ip;
@@ -247,17 +275,18 @@ susbcriber_add_del (u32 parent_if_index, u8 * client_mac,
 
   subscriber_key_t *sub_key;
 	sub_key = clib_mem_alloc (sizeof (*sub_key));
-	create_subscriber_key (sub_key, parent_if_index, client_mac, outer_vlan, inner_vlan);
+	create_subscriber_key (sub_key, t->encap_if_index, t->client_mac, t->outer_vlan, t->inner_vlan);
 	hash_set_mem (sm->subscriber_by_key, sub_key, sw_if_index);
 
   fib_prefix_t pfx;
-
+  pfx.fp_addr.as_u64[ 0 ] = 0;
+  pfx.fp_addr.as_u64[ 1 ] = 0;
   pfx.fp_addr.ip4.as_u32 = client_ip.ip4.as_u32;
   pfx.fp_len = 32;
   pfx.fp_proto = FIB_PROTOCOL_IP4;
 
   fib_table_entry_path_add (0, &pfx, // TODO fib
-				subscriber_fib_src, FIB_ENTRY_FLAG_NONE,
+				subscriber_fib_src, FIB_ENTRY_FLAG_CONNECTED,
 				fib_proto_to_dpo (pfx.fp_proto),
 				&pfx.fp_addr, sw_if_index, ~0,
 				1, NULL, FIB_ROUTE_PATH_FLAG_NONE);
@@ -479,6 +508,16 @@ format_subscriber_session (u8 * s, va_list * args)
   s = format (s, "\tRouting table: %d\n", t->decap_fib_index );
   s = format (s, "\tHW Interface index %d\n", t->encap_if_index );
   s = format (s, "\tLocal MAC: %U\n", format_ethernet_address, t->local_mac);
+  s = format (s, "\tEncapsulation: " );
+  if( t->outer_vlan == ~0 ) {
+    s = format (s, "untagged");
+  } else {
+    s = format (s, "vlan %d", clib_net_to_host_u16( t->outer_vlan ));
+    if( t->inner_vlan != (u16)~0 ) {
+      s = format (s, ":%d", clib_net_to_host_u16( t->inner_vlan ));
+    }
+  }
+  s = format (s, "\n");
 
   return s;
 }
@@ -533,7 +572,6 @@ subscriber_build_rewrite (vnet_main_t * vnm,
 		     u32 sw_if_index,
 		     vnet_link_t link_type, const void *dst_address)
 {
-  int len = sizeof (ethernet_header_t);
   subscriber_main_t *sub_main = &subscriber_main;
   subscriber_session_t *sess;
   u32 session_id;
@@ -542,19 +580,39 @@ subscriber_build_rewrite (vnet_main_t * vnm,
   session_id = sub_main->subscriber_by_sw_if_index[sw_if_index];
   sess = pool_elt_at_index (sub_main->sessions, session_id);
 
+  int len = sizeof (ethernet_header_t);
+  if( sess->outer_vlan != (u16)~0) {
+    len += sizeof( ethernet_vlan_header_t);
+    if( sess->inner_vlan != (u16)~0) 
+      len += sizeof( ethernet_vlan_header_t);
+  }
   vec_validate_aligned (rw, len - 1, CLIB_CACHE_LINE_BYTES);
 
   ethernet_header_t *eth_hdr = (ethernet_header_t *) rw;
   clib_memcpy (eth_hdr->dst_address, sess->client_mac, 6);
   clib_memcpy (eth_hdr->src_address, sess->local_mac, 6);
+  u16 *type = &eth_hdr->type;
+
+  if( sess->outer_vlan != (u16)~0){
+    ethernet_vlan_header_t *vlan_hdr = (ethernet_vlan_header_t*)( eth_hdr + 1 );
+    eth_hdr->type = 0x0081;
+    type = &vlan_hdr->type;
+    vlan_hdr->priority_cfi_and_id = sess->outer_vlan;
+    if( sess->inner_vlan != (u16)~0) {
+      vlan_hdr->type = 0x0081;
+      vlan_hdr+=1;
+      type = &vlan_hdr->type;
+      vlan_hdr->priority_cfi_and_id = sess->inner_vlan;
+    }
+  }
 
   switch (link_type)
     {
     case VNET_LINK_IP4:
-      eth_hdr->type = clib_host_to_net_u16 (ETHERNET_TYPE_IP4);
+      *type = clib_host_to_net_u16 (ETHERNET_TYPE_IP4);
       break;
     case VNET_LINK_IP6:
-      eth_hdr->type = clib_host_to_net_u16 (ETHERNET_TYPE_IP6);
+      *type = clib_host_to_net_u16 (ETHERNET_TYPE_IP6);
       break;
     default:
       break;
@@ -577,7 +635,7 @@ void
 subscriber_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
 {
   subscriber_main_t *sub_main = &subscriber_main;
-  //dpo_id_t dpo = DPO_INVALID;
+  dpo_id_t dpo = DPO_INVALID;
   ip_adjacency_t *adj;
   subscriber_session_t *sess;
   u32 session_id;
@@ -585,6 +643,7 @@ subscriber_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
   ASSERT (ADJ_INDEX_INVALID != ai);
 
   adj = adj_get (ai);
+
   session_id = sub_main->subscriber_by_sw_if_index[sw_if_index];
   sess = pool_elt_at_index (sub_main->sessions, session_id);
 
@@ -626,12 +685,11 @@ subscriber_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
     }
 
   interface_tx_dpo_add_or_lock (vnet_link_to_dpo_proto (adj->ia_link),
-				sess->encap_if_index, &sess->dpo);
+				sess->encap_if_index, &dpo);
 
+  adj_nbr_midchain_stack (ai, &dpo);
 
-  adj_nbr_midchain_stack (ai, &sess->dpo);
-
-  //dpo_reset (&dpo);
+  dpo_reset (&dpo);
 }
 
 
