@@ -15,6 +15,7 @@
 add_vpp_plugin(subscriber
   SOURCES
   subscriber.c
+  subscriber_api.c
   node.c
   subscriber_periodic.c
   subscriber.h

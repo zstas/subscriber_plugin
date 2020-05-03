@@ -176,7 +176,7 @@ VLIB_NODE_FN (subscriber_node) (vlib_main_t * vm,
 
     result0 = subscriber_lookup (sw_if_index0, h0->src_address, outer_vlan, inner_vlan);
 
-          if (PREDICT_FALSE (result0 == ~0))
+    if (PREDICT_FALSE (result0 == ~0))
 	    {
 	      error0 = SUBSCRIBER_ERROR_NO_SUCH_SESSION;
 	      next0 = SUBSCRIBER_INPUT_NEXT_DROP;

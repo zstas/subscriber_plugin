@@ -177,14 +177,13 @@ create_subscriber_key (subscriber_key_t * p2pe_key, u32 parent_if_index, u8 * cl
 u32
 subscriber_lookup (u32 parent_if_index, u8 * client_mac, u16 outer_vlan, u16 inner_vlan)
 {
-  subscriber_main_t *sub_main = &subscriber_main;
-  subscriber_key_t subs_key;
-  uword *p;
-
-  create_subscriber_key (&subs_key, parent_if_index, client_mac, outer_vlan, inner_vlan);
-  p = hash_get_mem (sub_main->subscriber_by_key, &subs_key);
-  if (p)
-    return p[0];
+  subscriber_main_t *sm = &subscriber_main;
+  
+  subscriber_key_t sub_key;
+  create_subscriber_key( &sub_key, parent_if_index, client_mac, outer_vlan, inner_vlan);
+  uword *lookup = hash_get_mem(sm->subscriber_by_key, &sub_key);
+  if (lookup)
+    return *lookup;
 
   return ~0;
 }
@@ -240,9 +239,10 @@ susbcriber_add_del (u32 parent_if_index, u8 * client_mac,
 
   hi = vnet_get_hw_interface (vnm, parent_if_index);
 
-  subscriber_key_t sub_key;
-  create_subscriber_key( &sub_key, parent_if_index, client_mac, clib_host_to_net_u16( outer_vlan), clib_host_to_net_u16( inner_vlan) );
-  uword *lookup = hash_get_mem(sm->subscriber_by_key, &sub_key);
+  subscriber_key_t *sub_key;
+  sub_key = clib_mem_alloc (sizeof (*sub_key));
+  create_subscriber_key( sub_key, parent_if_index, client_mac, clib_host_to_net_u16( outer_vlan), clib_host_to_net_u16( inner_vlan) );
+  uword *lookup = hash_get_mem(sm->subscriber_by_key, sub_key);
 
   if( is_add == 0 ) {
     /* deleting a session: session must exist */
@@ -258,9 +258,12 @@ susbcriber_add_del (u32 parent_if_index, u8 * client_mac,
 
     vec_add1 (sm->free_subscriber_session_hw_if_indices, t->hw_if_index);
 
-    //sm->subscriber_by_sw_if_index[t->sw_if_index] = ~0;
-    hash_unset(sm->subscriber_by_sw_if_index, t->sw_if_index);
-    hash_unset(sm->subscriber_by_key, &sub_key );
+    hi = vnet_get_hw_interface (vnm, t->hw_if_index);
+    vec_reset_length(hi->hw_address);
+
+    sm->subscriber_by_sw_if_index[t->sw_if_index] = ~0;
+    //hash_unset(sm->subscriber_by_sw_if_index, t->sw_if_index);
+    hash_unset_mem(sm->subscriber_by_key, sub_key );
 
     /* delete reverse route for client ip */
     fib_table_entry_path_remove (0, &pfx,
@@ -337,7 +340,7 @@ susbcriber_add_del (u32 parent_if_index, u8 * client_mac,
   si->flags &= ~VNET_SW_INTERFACE_FLAG_HIDDEN;
   vnet_sw_interface_set_flags (vnm, sw_if_index, VNET_SW_INTERFACE_FLAG_ADMIN_UP);
 
-	hash_set(sm->subscriber_by_key, &sub_key, session_id);
+	hash_set_mem(sm->subscriber_by_key, sub_key, session_id);
 
   fib_table_entry_path_add (0, &pfx, // TODO fib
 				subscriber_fib_src, FIB_ENTRY_FLAG_CONNECTED,
@@ -524,23 +527,6 @@ VLIB_CLI_COMMAND (subscriber_create_delete_command, static) =
   .function = subscriber_create_delete_command_fn,
 };
 /* *INDENT-ON* */
-
-/* API message handler */
-static void vl_api_subscriber_enable_disable_t_handler
-(vl_api_subscriber_enable_disable_t * mp)
-{
-  vl_api_subscriber_enable_disable_reply_t * rmp;
-  subscriber_main_t * smp = &subscriber_main;
-  int rv;
-
-  rv = subscriber_enable_disable (smp, ntohl(mp->sw_if_index),
-                                      (int) (mp->enable_disable));
-
-  REPLY_MACRO(VL_API_SUBSCRIBER_ENABLE_DISABLE_REPLY);
-}
-
-/* API definitions */
-#include <subscriber/subscriber.api.c>
 
 /* *INDENT-OFF* */
 VNET_FEATURE_INIT (subscriber, static) =
@@ -758,9 +744,6 @@ subscriber_init (vlib_main_t * vm)
   sm->vnet_main = vnet_get_main ();
   sm->subscriber_by_key = hash_create_mem (0, sizeof (subscriber_key_t), sizeof (subscriber_entry_result_t));
   sm->free_subscriber_session_hw_if_indices = 0;
-
-  /* Add our API messages to the global name_crc hash table */
-  sm->msg_id_base = setup_message_id_table ();
 
   subscriber_fib_src = fib_source_allocate ("ipsession",
 				       FIB_SOURCE_PRIORITY_HI,
