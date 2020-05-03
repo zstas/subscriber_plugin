@@ -258,6 +258,7 @@ susbcriber_add_del (u32 parent_if_index, u8 * client_mac,
 
     vec_add1 (sm->free_subscriber_session_hw_if_indices, t->hw_if_index);
 
+    // clearing mac vector
     hi = vnet_get_hw_interface (vnm, t->hw_if_index);
     vec_reset_length(hi->hw_address);
 
@@ -663,16 +664,6 @@ subscriber_build_rewrite (vnet_main_t * vnm,
   return rw;
 }
 
-/**
- * @brief Fixup the adj rewrite post encap. Insert the packet's length
- */
-static void
-subscriber_fixup (vlib_main_t * vm,
-	     const ip_adjacency_t * adj, vlib_buffer_t * b0, const void *data)
-{
-  // do nothing
-}
-
 void
 subscriber_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
 {
@@ -694,7 +685,7 @@ subscriber_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
     case IP_LOOKUP_NEXT_ARP:
     case IP_LOOKUP_NEXT_GLEAN:
     case IP_LOOKUP_NEXT_BCAST:
-      adj_nbr_midchain_update_rewrite (ai, subscriber_fixup, sess,
+      adj_nbr_midchain_update_rewrite (ai, 0, 0,
 				       ADJ_FLAG_NONE,
 				       subscriber_build_rewrite (vnm,
 							    sw_if_index,
@@ -706,7 +697,7 @@ subscriber_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
        * Construct a partial rewrite from the known ethernet mcast dest MAC
        * There's no MAC fixup, so the last 2 parameters are 0
        */
-      adj_mcast_midchain_update_rewrite (ai, subscriber_fixup, sess,
+      adj_mcast_midchain_update_rewrite (ai, 0, 0,
 					 ADJ_FLAG_NONE,
 					 subscriber_build_rewrite (vnm,
 							      sw_if_index,
